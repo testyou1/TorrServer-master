@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"server/proxy"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/anacrolix/publicip"
@@ -24,14 +25,16 @@ import (
 )
 
 type BTServer struct {
-	config          *torrent.ClientConfig
-	client          *torrent.Client
-	storage         *torrstor.Storage
-	torrents        map[metainfo.Hash]*Torrent
-	mu              sync.Mutex
-	uploadLimiter   *rate.Limiter
-	uploadPacerStop chan struct{}
-	uploadPacerWg   sync.WaitGroup
+	config              *torrent.ClientConfig
+	client              *torrent.Client
+	storage             *torrstor.Storage
+	torrents            map[metainfo.Hash]*Torrent
+	mu                  sync.RWMutex
+	uploadLimiter       *rate.Limiter
+	uploadPacerStop     atomic.Pointer[chan struct{}]
+	uploadPacerRunning  atomic.Bool
+	uploadPacerWg       sync.WaitGroup
+	disconnectOnce      sync.Once
 }
 
 var privateIPBlocks []*net.IPNet
@@ -67,49 +70,52 @@ func (bt *BTServer) Connect() error {
 	var err error
 	bt.configure(context.TODO())
 	bt.client, err = torrent.NewClient(bt.config)
+	if err != nil {
+		return err
+	}
 	bt.torrents = make(map[metainfo.Hash]*Torrent)
 	InitApiHelper(bt)
 	proxy.Start()
 	if !settings.BTsets.DisableUpload && settings.BTsets.UploadRateLimit >= 0 {
-		bt.uploadPacerStop = make(chan struct{})
+		stopCh := make(chan struct{})
+		bt.uploadPacerStop.Store(&stopCh)
+		bt.uploadPacerRunning.Store(true)
 		bt.uploadPacerWg.Add(1)
 		go bt.uploadPacer()
 	}
-	return err
+	return nil
 }
 
 func (bt *BTServer) Disconnect() {
-	bt.mu.Lock()
-	pacerStop := bt.uploadPacerStop
-	bt.uploadPacerStop = nil
-	bt.mu.Unlock()
+	bt.disconnectOnce.Do(func() {
+		stopChPtr := bt.uploadPacerStop.Load()
+		if stopChPtr != nil {
+			close(*stopChPtr)
+			bt.uploadPacerRunning.Store(false)
+			bt.uploadPacerWg.Wait()
+		}
 
-	if pacerStop != nil {
-		close(pacerStop)
-		bt.uploadPacerWg.Wait()
-	}
-
-	bt.mu.Lock()
-	if bt.client != nil {
-		bt.client.Close()
+		bt.mu.Lock()
+		client := bt.client
 		bt.client = nil
-		utils.FreeOSMemGC()
-	}
-	bt.mu.Unlock()
-	proxy.Stop()
+		bt.mu.Unlock()
+
+		if client != nil {
+			client.Close()
+			utils.FreeOSMemGC()
+		}
+		proxy.Stop()
+	})
 }
 
 func (bt *BTServer) uploadPacer() {
 	defer bt.uploadPacerWg.Done()
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
-	bt.mu.Lock()
-	stopCh := bt.uploadPacerStop
-	bt.mu.Unlock()
 	var lastStreaming bool
 	for {
 		select {
-		case <-stopCh:
+		case <-*(bt.uploadPacerStop.Load()):
 			bt.mu.Lock()
 			lim := bt.uploadLimiter
 			bt.mu.Unlock()
@@ -320,8 +326,8 @@ func (bt *BTServer) configureProxy() error {
 }
 
 func (bt *BTServer) GetTorrent(hash torrent.InfoHash) *Torrent {
-	bt.mu.Lock()
-	defer bt.mu.Unlock()
+	bt.mu.RLock()
+	defer bt.mu.RUnlock()
 	if torr, ok := bt.torrents[hash]; ok {
 		return torr
 	}
@@ -329,17 +335,17 @@ func (bt *BTServer) GetTorrent(hash torrent.InfoHash) *Torrent {
 }
 
 func (bt *BTServer) ListTorrents() map[metainfo.Hash]*Torrent {
-	bt.mu.Lock()
-	defer bt.mu.Unlock()
+	bt.mu.RLock()
+	defer bt.mu.RUnlock()
 	list := make(map[metainfo.Hash]*Torrent, len(bt.torrents))
 	maps.Copy(list, bt.torrents)
 	return list
 }
 
 func (bt *BTServer) RemoveTorrent(hash torrent.InfoHash) bool {
-	bt.mu.Lock()
+	bt.mu.RLock()
 	torr, ok := bt.torrents[hash]
-	bt.mu.Unlock()
+	bt.mu.RUnlock()
 	if ok {
 		return torr.Close()
 	}

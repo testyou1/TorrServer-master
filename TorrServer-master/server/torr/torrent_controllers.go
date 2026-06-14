@@ -514,28 +514,28 @@ func (t *Torrent) progressEvent() {
 	if t.Torrent != nil && t.Torrent.Info() != nil {
 		torrentStats = t.Torrent.Stats()
 
-		deltaDlBytes := torrentStats.BytesRead.Int64() - t.BytesReadUsefulData
-		deltaUpBytes := torrentStats.BytesWritten.Int64() - t.BytesWrittenData
+		deltaDlBytes := torrentStats.BytesRead.Int64() - t.GetBytesReadUsefulData()
+		deltaUpBytes := torrentStats.BytesWritten.Int64() - t.GetBytesWrittenData()
 		deltaTime := time.Since(t.lastTimeSpeed).Seconds()
 
 		if deltaTime > 0 {
-			t.DownloadSpeed = float64(deltaDlBytes) / deltaTime
-			t.UploadSpeed = float64(deltaUpBytes) / deltaTime
+			t.SetDownloadSpeed(float64(deltaDlBytes) / deltaTime)
+			t.SetUploadSpeed(float64(deltaUpBytes) / deltaTime)
 		} else {
-			t.DownloadSpeed = 0
-			t.UploadSpeed = 0
+			t.SetDownloadSpeed(0)
+			t.SetUploadSpeed(0)
 		}
 
-		t.BytesReadUsefulData = torrentStats.BytesRead.Int64()
-		t.BytesWrittenData = torrentStats.BytesWritten.Int64()
+		t.SetBytesReadUsefulData(torrentStats.BytesRead.Int64())
+		t.SetBytesWrittenData(torrentStats.BytesWritten.Int64())
 
 		if t.cache != nil {
 			cacheSnapshot = t.cache.GetState()
-			t.PreloadedBytes = cacheSnapshot.Filled
+			t.SetPreloadedBytes(cacheSnapshot.Filled)
 		}
 	} else {
-		t.DownloadSpeed = 0
-		t.UploadSpeed = 0
+		t.SetDownloadSpeed(0)
+		t.SetUploadSpeed(0)
 	}
 
 	t.muTorrent.Unlock()
@@ -559,7 +559,7 @@ func (t *Torrent) updateRA(cacheSnapshot *cacheSt.CacheState, torrentStats torre
 		cacheCapacity = cacheSnapshot.Capacity
 		activeReaders = cacheSnapshot.ActiveReaders()
 		currentDownloaded = torrentStats.BytesRead.Int64()
-		bitRate = t.BitRate
+		bitRate = t.GetBitRate()
 		pieceLength = t.Info().PieceLength
 	}
 	t.muTorrent.Unlock()
@@ -601,8 +601,8 @@ func (t *Torrent) updateConnections(cacheSnapshot *cacheSt.CacheState, torrentSt
 		activePeers   int
 	)
 	if hasInfo && t.cache != nil && cacheSnapshot != nil {
-		downloadSpeed = t.DownloadSpeed
-		bitRateStr = t.BitRate
+		downloadSpeed = t.GetDownloadSpeed()
+		bitRateStr = t.GetBitRate()
 		cacheCapacity = cacheSnapshot.Capacity
 		cacheFilled = cacheSnapshot.Filled
 		activeReaders = cacheSnapshot.ActiveReaders()

@@ -1,4 +1,3 @@
-// preload.go
 package torr
 
 import (
@@ -10,12 +9,10 @@ import (
 	"time"
 
 	"server/ffprobe"
-
 	"server/log"
 	"server/settings"
 	"server/torr/state"
 	utils2 "server/utils"
-
 	"github.com/anacrolix/torrent"
 )
 
@@ -27,6 +24,12 @@ type preloadConfig struct {
 	endEnd       int64
 	earlyMinFrac float64
 	safetyRatio  float64
+}
+
+var preloadBufPool = sync.Pool{
+	New: func() interface{} {
+		return make([]byte, 0, 1<<20)
+	},
 }
 
 func computePreloadConfig(
@@ -100,9 +103,9 @@ func preloadShouldStop(
 ) (stop bool, reason string) {
 	t.muTorrent.Lock()
 	stat := t.Stat
-	preloadedBytes := t.PreloadedBytes
-	preloadSize := t.PreloadSize
-	downloadSpeed := t.DownloadSpeed
+	preloadedBytes := t.GetPreloadedBytes()
+	preloadSize := t.GetPreloadSize()
+	downloadSpeed := t.GetDownloadSpeed()
 	t.muTorrent.Unlock()
 
 	if stat != state.TorrentPreload {
@@ -129,7 +132,7 @@ func (t *Torrent) Preload(index int, size int64) {
 	if size <= 0 {
 		return
 	}
-	t.PreloadSize = size
+	t.SetPreloadSize(size)
 
 	if t.Stat == state.TorrentGettingInfo {
 		if !t.WaitInfo() {
@@ -152,8 +155,8 @@ func (t *Torrent) Preload(index int, size int64) {
 			t.Stat = state.TorrentWorking
 		}
 		t.muTorrent.Unlock()
-		t.BitRate = ""
-		t.DurationSeconds = 0
+		t.SetBitRate("")
+		t.SetDurationSeconds(0)
 	}()
 
 	file := t.findFileIndex(index)
@@ -196,8 +199,8 @@ func (t *Torrent) Preload(index int, size int64) {
 
 				statStr := fmt.Sprint(file.Torrent().InfoHash().HexString(), " ",
 					utils2.Format(float64(atomic.LoadInt64(&atomicDownloaded))), "/",
-					utils2.Format(float64(t.PreloadSize)), " Speed:",
-					utils2.Format(t.DownloadSpeed), " Peers:",
+					utils2.Format(float64(size)), " Speed:",
+					utils2.Format(t.GetDownloadSpeed()), " Peers:",
 					t.Torrent.Stats().ActivePeers, "/",
 					t.Torrent.Stats().TotalPeers, " [Seeds:",
 					t.Torrent.Stats().ConnectedSeeders, "]")
@@ -215,14 +218,14 @@ func (t *Torrent) Preload(index int, size int64) {
 			link = "https://127.0.0.1:" + settings.SslPort + "/play/" + t.Hash().HexString() + "/" + strconv.Itoa(index)
 		}
 		if data, err := ffprobe.ProbeUrl(link); err == nil {
-			t.BitRate = data.Format.BitRate
-			t.DurationSeconds = data.Format.DurationSeconds
+			t.SetBitRate(data.Format.BitRate)
+			t.SetDurationSeconds(data.Format.DurationSeconds)
 		}
 	}
 
 	t.muTorrent.Lock()
 	isClosed := t.Stat == state.TorrentClosed
-	bitRateStr := t.BitRate
+	bitRateStr := t.GetBitRate()
 	t.muTorrent.Unlock()
 
 	if isClosed {
@@ -280,15 +283,22 @@ func (t *Torrent) Preload(index int, size int64) {
 				return
 			}
 
+			endBuf := preloadBufPool.Get().([]byte)
+			endBuf = endBuf[:0]
+			if int64(cap(endBuf)) < cfg.bufSize {
+				endBuf = make([]byte, 0, cfg.bufSize)
+			}
+			defer preloadBufPool.Put(endBuf)
+
 			offset := cfg.endStart
-			endBuf := make([]byte, cfg.bufSize)
 			for offset < cfg.endEnd {
 				toRead := cfg.endEnd - offset
-				if toRead > int64(len(endBuf)) {
-					toRead = int64(len(endBuf))
+				if toRead > cfg.bufSize {
+					toRead = cfg.bufSize
 				}
 
-				n, err := readerEnd.Read(endBuf[:toRead])
+				readBuf := endBuf[:toRead]
+				n, err := readerEnd.Read(readBuf)
 				if err != nil {
 					if err != io.EOF {
 						log.TLogln("Err preload end read:", err)
@@ -319,7 +329,13 @@ func (t *Torrent) Preload(index int, size int64) {
 	readerStart.SetResponsive()
 	readerStart.SetReadahead(cfg.readahead)
 
-	buf := make([]byte, cfg.bufSize)
+	buf := preloadBufPool.Get().([]byte)
+	buf = buf[:0]
+	if int64(cap(buf)) < cfg.bufSize {
+		buf = make([]byte, 0, cfg.bufSize)
+	}
+	defer preloadBufPool.Put(buf)
+
 	offset := int64(0)
 	for offset < cfg.startEnd {
 		if stop, reason := preloadShouldStop(t, cfg, mediaBitrateBS); stop {
@@ -332,11 +348,12 @@ func (t *Torrent) Preload(index int, size int64) {
 		}
 
 		toRead := cfg.startEnd - offset
-		if toRead > int64(len(buf)) {
-			toRead = int64(len(buf))
+		if toRead > cfg.bufSize {
+			toRead = cfg.bufSize
 		}
 
-		n, err := readerStart.Read(buf[:toRead])
+		readBuf := buf[:toRead]
+		n, err := readerStart.Read(readBuf)
 		if err != nil {
 			if err != io.EOF {
 				log.TLogln("Error preload:", err)
@@ -346,7 +363,7 @@ func (t *Torrent) Preload(index int, size int64) {
 		atomic.AddInt64(&atomicDownloaded, int64(n))
 		offset += int64(n)
 
-		remaining := cfg.startEnd - (offset + int64(len(buf)))
+		remaining := cfg.startEnd - (offset + cfg.bufSize)
 		if cfg.readahead > 0 && remaining < cfg.readahead {
 			readerStart.SetReadahead(0)
 			cfg.readahead = 0

@@ -33,7 +33,7 @@ type Cache struct {
 	activeReaderCount atomic.Int32
 	storage           *Storage
 	capacity          int64
-	filled            int64
+	filled            atomic.Int64
 	hash              metainfo.Hash
 	pieceLength       int64
 	pieceCount        int
@@ -50,8 +50,7 @@ type Cache struct {
 	bufPool           sync.Pool
 	clearPrioSignal   chan struct{}
 	clearPrioDone     chan struct{}
-	lastSetPrio       time.Time
-	muLastSetPrio     sync.Mutex
+	lastSetPrio       atomic.Int64
 	lirs              *LIRSStore
 }
 
@@ -64,6 +63,8 @@ func NewCache(capacity int64, storage *Storage) *Cache {
 		clearPrioSignal: make(chan struct{}, 1),
 		clearPrioDone:   make(chan struct{}),
 	}
+	ret.filled.Store(0)
+	ret.lastSetPrio.Store(time.Now().Unix())
 	go ret.priorityCleaner()
 	return ret
 }
@@ -255,7 +256,7 @@ func (c *Cache) GetState() *state.CacheState {
 	}
 	c.muReaders.Unlock()
 
-	atomic.StoreInt64(&c.filled, fill)
+	c.filled.Store(fill)
 	cState.Capacity = c.capacity
 	cState.PiecesLength = c.pieceLength
 	cState.PiecesCount = c.pieceCount
@@ -295,7 +296,7 @@ func (c *Cache) cleanPieces() {
 	defer c.isRemove.Store(false)
 
 	remPieces := c.getRemPieces()
-	filled := atomic.LoadInt64(&c.filled)
+	filled := c.filled.Load()
 	if filled > c.capacity {
 		rems := (filled-c.capacity)/c.pieceLength + 1
 		for _, p := range remPieces {
@@ -315,7 +316,7 @@ type readerSnapshot struct {
 func (c *Cache) snapshotReadersLocked() []readerSnapshot {
 	snaps := make([]readerSnapshot, 0, len(c.readers))
 	for r := range c.readers {
-		if r.isUse {
+		if r.isUse.Load() {
 			snaps = append(snaps, readerSnapshot{pos: r.getReaderPiece()})
 		}
 	}
@@ -357,7 +358,7 @@ func (c *Cache) getRemPieces() []*Piece {
 	ranges := make([]Range, 0, len(readers))
 	for _, r := range readers {
 		r.checkReader()
-		if r.isUse {
+		if r.isUse.Load() {
 			ranges = append(ranges, r.getPiecesRange())
 		}
 	}
@@ -386,17 +387,17 @@ func (c *Cache) getRemPieces() []*Piece {
 	}
 	c.mu.RUnlock()
 
-	atomic.StoreInt64(&c.filled, fill)
+	c.filled.Store(fill)
 
 	c.requestClearPriority()
 
 	now := time.Now()
-	c.muLastSetPrio.Lock()
-	shouldSetPrio := now.Sub(c.lastSetPrio) >= setPrioThrottle
+	lastSetPrio := time.Unix(c.lastSetPrio.Load(), 0)
+	shouldSetPrio := now.Sub(lastSetPrio) >= setPrioThrottle
 	if shouldSetPrio {
-		c.lastSetPrio = now
+		c.lastSetPrio.Store(now.Unix())
 	}
-	c.muLastSetPrio.Unlock()
+
 	if shouldSetPrio {
 		c.setLoadPriority(ranges)
 	}
@@ -552,7 +553,7 @@ func (c *Cache) setLoadPriority(ranges []Range) {
 	}
 	readerInfos := make([]readerInfo, 0, activeCount)
 	for r := range c.readers {
-		if !r.isUse {
+		if !r.isUse.Load() {
 			continue
 		}
 		if c.isIdInFileBE(ranges, r.getReaderPiece()) {
@@ -707,7 +708,7 @@ func (c *Cache) doClearPriority() {
 	c.muReaders.Lock()
 	for r := range c.readers {
 		r.checkReader()
-		if r.isUse {
+		if r.isUse.Load() {
 			ranges = append(ranges, r.getPiecesRange())
 		}
 	}

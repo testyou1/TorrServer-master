@@ -24,8 +24,8 @@ func (t *Torrent) Status() *state.TorrentStatus {
 	st.Data = t.Data
 	st.Timestamp = t.Timestamp
 	st.TorrentSize = t.Size
-	st.BitRate = t.BitRate
-	st.DurationSeconds = t.DurationSeconds
+	st.BitRate = t.GetBitRate()
+	st.DurationSeconds = t.GetDurationSeconds()
 
 	if t.TorrentSpec != nil {
 		st.Hash = t.TorrentSpec.InfoHash.HexString()
@@ -35,10 +35,10 @@ func (t *Torrent) Status() *state.TorrentStatus {
 		st.Hash = t.Torrent.InfoHash().HexString()
 		st.LoadedSize = t.Torrent.BytesCompleted()
 
-		st.PreloadedBytes = t.PreloadedBytes
-		st.PreloadSize = t.PreloadSize
-		st.DownloadSpeed = t.DownloadSpeed
-		st.UploadSpeed = t.UploadSpeed
+		st.PreloadedBytes = t.GetPreloadedBytes()
+		st.PreloadSize = t.GetPreloadSize()
+		st.DownloadSpeed = t.GetDownloadSpeed()
+		st.UploadSpeed = t.GetUploadSpeed()
 
 		tst := t.Torrent.Stats()
 		st.BytesWritten = tst.BytesWritten.Int64()

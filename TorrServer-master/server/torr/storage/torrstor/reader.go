@@ -55,7 +55,7 @@ type Reader struct {
 	file       *torrent.File
 	cache      *Cache
 	isClosed   atomic.Bool
-	isUse      bool
+	isUse      atomic.Bool
 	mu         sync.Mutex
 	raw        rawReader
 	bufReader  *bufio.Reader
@@ -69,7 +69,7 @@ func newReader(file *torrent.File, cache *Cache) *Reader {
 	bufSize := calcReaderBufSize(cache.pieceLength)
 	r.bufReader = bufio.NewReaderSize(&r.raw, bufSize)
 	r.cache = cache
-	r.isUse = true
+	r.isUse.Store(true)
 	r.lastAccess.Store(time.Now().Unix())
 	cache.activeReaderCount.Add(1)
 	r.Reader.SetReadahead(0)
@@ -111,7 +111,7 @@ func (r *Reader) SetReadahead(length int64) {
 		length = r.cache.capacity
 	}
 	r.readahead.Store(length)
-	if r.isUse {
+	if r.isUse.Load() {
 		r.Reader.SetReadahead(length)
 	}
 }
@@ -126,12 +126,9 @@ func (r *Reader) Readahead() int64 {
 
 func (r *Reader) Close() {
 	r.isClosed.Store(true)
-	wasUse := false
 	r.mu.Lock()
-	wasUse = r.isUse
-	if r.isUse {
-		r.isUse = false
-	}
+	wasUse := r.isUse.Load()
+	r.isUse.Store(false)
 	r.mu.Unlock()
 	if wasUse {
 		r.cache.activeReaderCount.Add(-1)
@@ -169,8 +166,9 @@ func (r *Reader) getOffsetRange() (int64, int64) {
 		readers = 1
 	}
 	off := r.offset.Load()
-	beginOffset := off - (r.cache.capacity/readers)*(100-prc)/100
-	endOffset := off + (r.cache.capacity/readers)*prc/100
+	capPerReader := r.cache.capacity / readers
+	beginOffset := off - (capPerReader * (100 - prc) / 100)
+	endOffset := off + (capPerReader * prc / 100)
 	if beginOffset < 0 {
 		beginOffset = 0
 	}
@@ -193,7 +191,7 @@ func (r *Reader) checkReader() {
 func (r *Reader) readerOn() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if !r.isUse {
+	if !r.isUse.Load() {
 		off := r.offset.Load()
 		if pos, err := r.Reader.Seek(0, io.SeekCurrent); err == nil && pos == 0 {
 			r.Reader.Seek(off, io.SeekStart)
@@ -203,7 +201,7 @@ func (r *Reader) readerOn() {
 			ra = r.cache.capacity
 		}
 		r.Reader.SetReadahead(ra)
-		r.isUse = true
+		r.isUse.Store(true)
 		r.cache.activeReaderCount.Add(1)
 	}
 }
@@ -211,9 +209,9 @@ func (r *Reader) readerOn() {
 func (r *Reader) readerOff() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.isUse {
+	if r.isUse.Load() {
 		r.Reader.SetReadahead(0)
-		r.isUse = false
+		r.isUse.Store(false)
 		r.cache.activeReaderCount.Add(-1)
 		off := r.offset.Load()
 		if off > 0 {
